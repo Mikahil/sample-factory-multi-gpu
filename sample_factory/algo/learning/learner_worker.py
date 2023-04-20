@@ -118,8 +118,9 @@ class LearnerWorker(HeartbeatStoppableEventLoopObject, Configurable):
         self.scheduled_policy_version = policy_version.clone()
 
     def schedule_save(self) -> bool:
-        self.scheduled_saves.append(self.save)
-        self.set_scheduled_save.emit(self.learner.policy_versions_tensor[self.policy_id] + SCHEDULE_SAVE_OFFSET)
+        if len(self.scheduled_saves) == 0:
+            self.scheduled_saves.append(self.save)
+            self.set_scheduled_save.emit(self.learner.policy_versions_tensor[self.policy_id] + SCHEDULE_SAVE_OFFSET)
 
     def schedule_save_best(self, policy_id: PolicyID, metric: str, metric_value: float) -> bool:
         self.scheduled_saves.append(partial(self.save_best, policy_id, metric, metric_value))
@@ -183,7 +184,8 @@ class LearnerWorker(HeartbeatStoppableEventLoopObject, Configurable):
 
         if self.scheduled_policy_version == self.learner.policy_versions_tensor[self.policy_id]:
             if self.cfg.gpu_per_policy > 1:
-                self.learner.optimizer.consolidate_state_dict()
+                pass
+                # self.learner.optimizer.consolidate_state_dict()
             while len(self.scheduled_saves) > 0:
                 self.scheduled_saves.pop()()
 

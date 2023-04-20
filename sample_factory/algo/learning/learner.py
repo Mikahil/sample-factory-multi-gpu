@@ -12,6 +12,7 @@ import numpy as np
 import torch
 from torch import Tensor
 from torch.nn import Module
+import math
 
 from sample_factory.algo.learning.rnn_utils import build_core_out_from_seq, build_rnn_inputs
 from sample_factory.algo.utils.action_distributions import get_action_distribution, is_continuous_action_space
@@ -32,9 +33,8 @@ from sample_factory.utils.timing import Timing
 from sample_factory.utils.typing import ActionDistribution, Config, InitModelData, PolicyID, GpuID
 from sample_factory.utils.utils import ensure_dir_exists, experiment_dir, log
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.distributed.optim import ZeroRedundancyOptimizer as ZRO
-from torch.distributed.algorithms.ddp_comm_hooks.ddp_zero_hook import hook_with_zero_step
-from torch.distributed.algorithms.ddp_comm_hooks.default_hooks import allreduce_hook
+from gym_trades.rlexplore import RLEXP, magic_combine
+from gym_trades.envConstants import ENCODER_OUT_SIZE
 
 class LearningRateScheduler:
     def update(self, current_lr, recent_kls):
@@ -103,7 +103,45 @@ class LinearDecayScheduler(LearningRateScheduler):
         lr = self.linear_decay.at(self.step)
         return lr
 
+class WarmupCosineDecayScheduler(LearningRateScheduler):
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.warmup_steps = cfg.schedule_warmup_steps // (cfg.batch_size * cfg.num_epochs * cfg.gpu_per_policy)
+        self.total_steps = cfg.schedule_end_step // (cfg.batch_size * cfg.num_epochs * cfg.gpu_per_policy)
+        self.decay_steps = self.total_steps - self.warmup_steps
+        self.step = 0
 
+    def invoke_after_each_minibatch(self):
+        return True
+
+    def update(self, current_lr, recent_kls):
+        self.step += 1
+        if self.step <= self.warmup_steps:
+            lr = self.cfg.learning_rate * (self.step / self.warmup_steps)
+        else:
+            decay_step = self.step - self.warmup_steps
+            lr = 0.5 * self.cfg.learning_rate * (1 + math.cos(math.pi * decay_step / self.decay_steps))
+        return lr
+class WarmupCosineAnnealingScheduler(LearningRateScheduler):
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.warmup_steps = cfg.schedule_warmup_steps // (cfg.batch_size * cfg.num_epochs * cfg.gpu_per_policy)
+        self.total_steps = cfg.schedule_end_step // (cfg.batch_size * cfg.num_epochs * cfg.gpu_per_policy)
+        self.decay_steps = self.total_steps - self.warmup_steps
+        self.annealing_frequency = cfg.annealing_frequency  # Add the annealing frequency parameter
+        self.step = 0
+
+    def invoke_after_each_minibatch(self):
+        return True
+
+    def update(self, current_lr, recent_kls):
+        self.step += 1
+        if self.step <= self.warmup_steps:
+            lr = self.cfg.learning_rate * (self.step / self.warmup_steps)
+        else:
+            decay_step = self.step - self.warmup_steps
+            lr = self.cfg.learning_rate * (1 + math.cos(math.pi * decay_step * self.annealing_frequency / self.decay_steps)) / 2
+        return lr
 def get_lr_scheduler(cfg) -> LearningRateScheduler:
     if cfg.lr_schedule == "constant":
         return LearningRateScheduler()
@@ -113,6 +151,8 @@ def get_lr_scheduler(cfg) -> LearningRateScheduler:
         return KlAdaptiveSchedulerPerEpoch(cfg)
     elif cfg.lr_schedule == "linear_decay":
         return LinearDecayScheduler(cfg)
+    elif cfg.lr_schedule == "cosine_warmup":
+        return WarmupCosineDecayScheduler(cfg)
     else:
         raise RuntimeError(f"Unknown scheduler {cfg.lr_schedule}")
 
@@ -215,6 +255,8 @@ class Learner(Configurable):
 
         # trainable torch module
         self.actor_critic = create_actor_critic(self.cfg, self.env_info.obs_space, self.env_info.action_space)
+        if self.cfg.re_beta > 0:
+            self.rlexp = RLEXP([ENCODER_OUT_SIZE], 1, self.device, self.cfg.re_latent_dim, beta=self.cfg.re_beta, kappa=self.cfg.re_kappa)
         log.debug("Created Actor Critic model with architecture:")
         log.debug(self.actor_critic)
         self.actor_critic.model_to_device(self.device)
@@ -239,18 +281,12 @@ class Learner(Configurable):
 
         optimizer_cls = optimizer_cls[self.cfg.optimizer]
         log.debug(f"Using optimizer {optimizer_cls}")
+        self.scaler = torch.cuda.amp.GradScaler()
+        self.optimizer = optimizer_cls(self.actor_critic.parameters(),
+                                        lr=self.cfg.learning_rate,  # use default lr only in ctor, then we use the one loaded from the checkpoint
+                                        betas=(self.cfg.adam_beta1, self.cfg.adam_beta2),
+                                        eps=self.cfg.adam_eps)
 
-        if self.cfg.gpu_per_policy == 1:
-            self.optimizer = optimizer_cls(self.actor_critic.parameters(),
-                                            lr=self.cfg.learning_rate,  # use default lr only in ctor, then we use the one loaded from the checkpoint
-                                            betas=(self.cfg.adam_beta1, self.cfg.adam_beta2),
-                                            eps=self.cfg.adam_eps)
-        else:
-            self.optimizer = ZRO(self.actor_critic.parameters(), 
-                                 optimizer_cls,
-                                 lr=self.cfg.learning_rate,  # use default lr only in ctor, then we use the one loaded from the checkpoint
-                                 betas=(self.cfg.adam_beta1, self.cfg.adam_beta2),
-                                 eps=self.cfg.adam_eps)
 
         self.load_from_checkpoint(self.policy_id)
         self.param_server.init(self.actor_critic, self.train_step, self.device)
@@ -304,6 +340,7 @@ class Learner(Configurable):
         else:
             self.actor_critic.module.load_state_dict(checkpoint_dict["model"])
         self.optimizer.load_state_dict(checkpoint_dict["optimizer"])
+        self.scaler.load_state_dict(checkpoint_dict["scaler"])
         self.curr_lr = checkpoint_dict.get("curr_lr", self.cfg.learning_rate)
 
         log.info(f"Loaded experiment state at {self.train_step=}, {self.env_steps=}")
@@ -344,6 +381,7 @@ class Learner(Configurable):
             "model": model_state_dict,
             "optimizer": self.optimizer.state_dict(),
             "curr_lr": self.curr_lr,
+            "scaler": self.scaler.state_dict()
         }
         return checkpoint
 
@@ -356,7 +394,7 @@ class Learner(Configurable):
 
         checkpoint_dir = self.checkpoint_dir(self.cfg, self.policy_id)
         tmp_filepath = join(checkpoint_dir, f"{name_prefix}_temp")
-        checkpoint_name = f"{name_prefix}_{self.train_step:09d}_{self.env_steps}{name_suffix}.pth"
+        checkpoint_name = f"{name_prefix}_{self.train_step:09d}_{self.env_steps * self.cfg.gpu_per_policy}{name_suffix}.pth"
         filepath = join(checkpoint_dir, checkpoint_name)
         if verbose:
             log.info("Saving %s...", filepath)
@@ -382,7 +420,7 @@ class Learner(Configurable):
         checkpoint = self._get_checkpoint_dict()
         assert checkpoint is not None
         checkpoint_dir = self.checkpoint_dir(self.cfg, self.policy_id)
-        checkpoint_name = f"checkpoint_{self.train_step:09d}_{self.env_steps}.pth"
+        checkpoint_name = f"checkpoint_{self.train_step:09d}_{self.env_steps * self.cfg.gpu_per_policy}.pth"
 
         milestones_dir = ensure_dir_exists(join(checkpoint_dir, "milestones"))
         milestone_path = join(milestones_dir, f"{checkpoint_name}")
@@ -570,32 +608,34 @@ class Learner(Configurable):
             head_outputs = actor_critic.forward_head(mb.normalized_obs)
             minibatch_size: int = head_outputs.size(0)
 
+        # rnn_states = None
         # initial rnn states
-        with self.timing.add_time("bptt_initial"):
-            if self.cfg.use_rnn:
-                # this is the only way to stop RNNs from backpropagating through invalid timesteps
-                # (i.e. experience collected by another policy)
-                done_or_invalid = torch.logical_or(mb.dones_cpu, ~valids.cpu()).float()
-                head_output_seq, rnn_states, inverted_select_inds = build_rnn_inputs(
-                    head_outputs,
-                    done_or_invalid,
-                    mb.rnn_states,
-                    recurrence,
-                )
-                is_seq = True
-            else:
-                rnn_states = mb.rnn_states[::recurrence]
-                is_seq = False
+        # with self.timing.add_time("bptt_initial"):
+        #     if self.cfg.use_rnn:
+        #         # this is the only way to stop RNNs from backpropagating through invalid timesteps
+        #         # (i.e. experience collected by another policy)
+        #         done_or_invalid = torch.logical_or(mb.dones_cpu, ~valids.cpu()).float()
+        #         head_output_seq, rnn_states, inverted_select_inds = build_rnn_inputs(
+        #             head_outputs,
+        #             done_or_invalid,
+        #             mb.rnn_states,
+        #             recurrence,
+        #         )
+        #         is_seq = True
+        #     else:
+            # rnn_states = mb.rnn_states[::recurrence]
+            rnn_states = mb.rnn_states
+        #         is_seq = False
 
         # calculate RNN outputs for each timestep in a loop
         with self.timing.add_time("bptt"):
-            if self.cfg.use_rnn:
-                with self.timing.add_time("bptt_forward_core"):
-                    core_output_seq, _ = self.actor_critic(head_output_seq, rnn_states, is_seq=is_seq)
-                core_outputs = build_core_out_from_seq(core_output_seq, inverted_select_inds)
-                del core_output_seq
-            else:
-                core_outputs, _ = self.actor_critic(head_outputs, rnn_states, is_seq=is_seq)
+            # if self.cfg.use_rnn:
+            #     with self.timing.add_time("bptt_forward_core"):
+            #         core_output_seq, _ = self.actor_critic(head_output_seq, rnn_states, is_seq=is_seq, core_only=True)
+            #     core_outputs = build_core_out_from_seq(core_output_seq, inverted_select_inds)
+            #     del core_output_seq
+            # else:
+            core_outputs, _ = self.actor_critic(head_outputs, rnn_states, is_seq=False, core_only=True)
 
             del head_outputs
 
@@ -741,38 +781,39 @@ class Learner(Configurable):
                     # enable syntactic sugar that allows us to access dict's keys as object attributes
                     mb = AttrDict(mb)
 
-                with timing.add_time("calculate_losses"):
-                    (
-                        action_distribution,
-                        policy_loss,
-                        exploration_loss,
-                        kl_old,
-                        kl_loss,
-                        value_loss,
-                        loss_summaries,
-                    ) = self._calculate_losses(mb, num_invalids)
+                with torch.cuda.amp.autocast(enabled=self.cfg.fp16_autocast, dtype=torch.float16, cache_enabled=False):
+                    with timing.add_time("calculate_losses"):
+                        (
+                            action_distribution,
+                            policy_loss,
+                            exploration_loss,
+                            kl_old,
+                            kl_loss,
+                            value_loss,
+                            loss_summaries,
+                        ) = self._calculate_losses(mb, num_invalids)
 
-                with timing.add_time("losses_postprocess"):
-                    # noinspection PyTypeChecker
-                    actor_loss: Tensor = policy_loss + exploration_loss + kl_loss
-                    critic_loss = value_loss
-                    loss: Tensor = actor_loss + critic_loss
+                    with timing.add_time("losses_postprocess"):
+                        # noinspection PyTypeChecker
+                        actor_loss: Tensor = policy_loss + exploration_loss + kl_loss
+                        critic_loss = value_loss
+                        loss: Tensor = actor_loss + critic_loss
 
-                    epoch_actor_losses[batch_num] = float(actor_loss)
+                        epoch_actor_losses[batch_num] = float(actor_loss)
 
-                    high_loss = 30.0
-                    if torch.abs(loss) > high_loss:
-                        log.warning(
-                            "High loss value: l:%.4f pl:%.4f vl:%.4f exp_l:%.4f kl_l:%.4f (recommended to adjust the --reward_scale parameter)",
-                            to_scalar(loss),
-                            to_scalar(policy_loss),
-                            to_scalar(value_loss),
-                            to_scalar(exploration_loss),
-                            to_scalar(kl_loss),
-                        )
+                        high_loss = 30.0
+                        if torch.abs(loss) > high_loss:
+                            log.warning(
+                                "High loss value: l:%.4f pl:%.4f vl:%.4f exp_l:%.4f kl_l:%.4f (recommended to adjust the --reward_scale parameter)",
+                                to_scalar(loss),
+                                to_scalar(policy_loss),
+                                to_scalar(value_loss),
+                                to_scalar(exploration_loss),
+                                to_scalar(kl_loss),
+                            )
 
-                        # perhaps something weird is happening, we definitely want summaries from this step
-                        force_summaries = True
+                            # perhaps something weird is happening, we definitely want summaries from this step
+                            force_summaries = True
 
                 with torch.no_grad(), timing.add_time("kl_divergence"):
                     # if kl_old is not None it is already calculated above
@@ -796,12 +837,20 @@ class Learner(Configurable):
                     for p in self.actor_critic.parameters():
                         p.grad = None
 
-                    loss.backward()
+                    if self.cfg.fp16_autocast:
+                        self.scaler.scale(loss).backward()
+                    else:
+                        loss.backward()
 
                     if self.cfg.max_grad_norm > 0.0:
+                        if self.cfg.fp16_autocast:
+                            self.scaler.unscale_(self.optimizer)
                         with timing.add_time("clip"):
                             torch.nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.cfg.max_grad_norm)
 
+                    if self.cfg.fp16_autocast:
+                        self.scaler.step(self.optimizer)
+                        self.scaler.update()
                     curr_policy_version = self.train_step  # policy version before the weight update
 
                     actual_lr = self.curr_lr
@@ -922,8 +971,8 @@ class Learner(Configurable):
 
         # this caused numerical issues on some versions of PyTorch with second moment reaching infinity
         adam_max_second_moment = 0.0
-        optimizer = self.optimizer if self.cfg.gpu_per_policy == 1 else self.optimizer.optim
-        for key, tensor_state in optimizer.state.items():
+        # optimizer = self.optimizer if self.cfg.gpu_per_policy == 1 else self.optimizer.optim
+        for key, tensor_state in self.optimizer.state.items():
             adam_max_second_moment = max(tensor_state["exp_avg_sq"].max().item(), adam_max_second_moment)
         stats.adam_max_second_moment = adam_max_second_moment
 
@@ -979,6 +1028,13 @@ class Learner(Configurable):
 
             buff["normalized_obs"] = self._prepare_and_normalize_obs(buff["obs"])
             del buff["obs"]  # don't need non-normalized obs anymore
+
+            if self.cfg.re_beta > 0:
+                irs = self.rlexp.compute_irs(rollouts={'observations': actor_critic.forward_head({x: magic_combine(buff["normalized_obs"][x]) for x in buff["normalized_obs"]}).view(buff['rewards'].shape[0], buff['rewards'].shape[1] + 1, -1)}, 
+                                            time_steps=self.train_step, 
+                                            k=self.cfg.re_k, 
+                                            average_entropy=self.cfg.re_average_entropy,)
+                buff["rewards"] += irs[:, :-1]
 
             # calculate estimated value for the next step (T+1)
             normalized_last_obs = buff["normalized_obs"][:, -1]
@@ -1060,27 +1116,27 @@ class Learner(Configurable):
         with self.timing.add_time("prepare_batch"):
             buff, experience_size, num_invalids = self._prepare_batch(batch)
 
-        if num_invalids >= experience_size:
-            if self.cfg.with_pbt:
-                log.warning("No valid samples in the batch, with PBT this must mean we just replaced weights")
-            else:
-                log.error(f"Learner {self.policy_id=} received an entire batch of invalid data, skipping...")
-            return None
+        # if num_invalids >= experience_size:
+        #     if self.cfg.with_pbt:
+        #         log.warning("No valid samples in the batch, with PBT this must mean we just replaced weights")
+        #     else:
+        #         log.error(f"Learner {self.policy_id=} received an entire batch of invalid data, skipping...")
+        #     return None
+        # else:
+        with self.timing.add_time("train"):
+            train_stats = self._train(buff, self.cfg.batch_size, experience_size, num_invalids)
+
+        # multiply the number of samples by frameskip so that FPS metrics reflect the number
+        # of environment steps actually simulated
+        if self.cfg.summaries_use_frameskip:
+            self.env_steps += experience_size * self.env_info.frameskip
         else:
-            with self.timing.add_time("train"):
-                train_stats = self._train(buff, self.cfg.batch_size, experience_size, num_invalids)
+            self.env_steps += experience_size
 
-            # multiply the number of samples by frameskip so that FPS metrics reflect the number
-            # of environment steps actually simulated
-            if self.cfg.summaries_use_frameskip:
-                self.env_steps += experience_size * self.env_info.frameskip
-            else:
-                self.env_steps += experience_size
-
-            stats = {LEARNER_ENV_STEPS: self.env_steps, POLICY_ID_KEY: self.policy_id, GPU_ID_KEY: self.gpu_id}
+        stats = {LEARNER_ENV_STEPS: self.env_steps, POLICY_ID_KEY: self.policy_id, GPU_ID_KEY: self.gpu_id}
+        if train_stats is not None:
             if train_stats is not None:
-                if train_stats is not None:
-                    stats[TRAIN_STATS] = train_stats
-                stats[STATS_KEY] = memory_stats("learner", self.device)
+                stats[TRAIN_STATS] = train_stats
+            stats[STATS_KEY] = memory_stats("learner", self.device)
 
-            return stats
+        return stats

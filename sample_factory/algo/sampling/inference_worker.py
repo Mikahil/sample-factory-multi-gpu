@@ -289,6 +289,7 @@ class InferenceWorker(HeartbeatStoppableEventLoopObject, Configurable):
             output_value = policy_outputs[name].float()
             while output_value.dim() <= 1:
                 output_value.unsqueeze_(-1)
+            # print(name, output_value.shape)
             output_tensors.append(output_value)
 
         output_tensors = torch.cat(output_tensors, dim=1)
@@ -329,6 +330,7 @@ class InferenceWorker(HeartbeatStoppableEventLoopObject, Configurable):
                 rnn_states = ensure_torch_tensor(rnn_states).to(self.device).float()
 
             with timing.add_time("forward"):
+                # print("rnn_states", rnn_states.shape, "normalized_obs", normalized_obs["obs"].shape)
                 policy_outputs = actor_critic(normalized_obs, rnn_states)
                 policy_outputs["policy_version"] = torch.empty([num_samples]).fill_(self.param_client.policy_version)
 

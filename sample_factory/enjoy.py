@@ -85,7 +85,7 @@ def render_frame(cfg, env, video_frames, num_episodes, last_render_start) -> flo
 def enjoy(cfg: Config) -> Tuple[StatusCode, float]:
     verbose = False
 
-    cfg = load_from_checkpoint(cfg)
+    # cfg = load_from_checkpoint(cfg)
 
     eval_env_frameskip: int = cfg.env_frameskip if cfg.eval_env_frameskip is None else cfg.eval_env_frameskip
     assert (
@@ -138,10 +138,12 @@ def enjoy(cfg: Config) -> Tuple[StatusCode, float]:
     obs, infos = env.reset()
     rnn_states = torch.zeros([env.num_agents, get_rnn_size(cfg)], dtype=torch.float32, device=device)
     episode_reward = None
+    trades_executed = 0
     finished_episode = [False for _ in range(env.num_agents)]
 
     video_frames = []
     num_episodes = 0
+    done_step = 0
 
     with torch.no_grad():
         while not max_frames_reached(num_frames):
@@ -153,22 +155,32 @@ def enjoy(cfg: Config) -> Tuple[StatusCode, float]:
 
             # sample actions from the distribution by default
             actions = policy_outputs["actions"]
-
+            action_distribution = actor_critic.action_distribution()
             if cfg.eval_deterministic:
-                action_distribution = actor_critic.action_distribution()
-                actions = argmax_actions(action_distribution)
+                actions = argmax_actions(action_distribution).cpu().tolist()
+            else:
+                actions = np.zeros(len(policy_outputs['action_logits'][0]), dtype=np.int32)
+                for i in range(cfg.eval_topk):
+                    actions[actor_critic.action_distribution().sample()] += 1
+                curr_idx = 0
+                curr_max = actions[0]
+                for i in range(1, len(actions)):
+                    if actions[i] > curr_max:
+                        curr_max = actions[i]
+                        curr_idx = i
+                actions = [curr_idx]
 
             # actions shape should be [num_agents, num_actions] even if it's [1, 1]
-            if actions.ndim == 1:
-                actions = unsqueeze_tensor(actions, dim=-1)
-            actions = preprocess_actions(env_info, actions)
+            # if actions.ndim == 1:
+            #     actions = unsqueeze_tensor(actions, dim=-1)
+            # actions = preprocess_actions(env_info, actions)
 
             rnn_states = policy_outputs["new_rnn_states"]
 
             for _ in range(render_action_repeat):
                 last_render_start = render_frame(cfg, env, video_frames, num_episodes, last_render_start)
-
                 obs, rew, terminated, truncated, infos = env.step(actions)
+                done_step +=1
                 dones = make_dones(terminated, truncated)
                 infos = [{} for _ in range(env_info.num_agents)] if infos is None else infos
 
@@ -176,10 +188,12 @@ def enjoy(cfg: Config) -> Tuple[StatusCode, float]:
                     episode_reward = rew.float().clone()
                 else:
                     episode_reward += rew.float()
+                if 'episode_extra_stats' in infos[0]:
+                    trades_executed += infos[0]['episode_extra_stats'].get("trade/trades_executed", 0)
 
                 num_frames += 1
-                if num_frames % 100 == 0:
-                    log.debug(f"Num frames {num_frames}...")
+                # if num_frames % 100 == 0:
+                #     log.debug(f"Num frames {num_frames}...")
 
                 dones = dones.cpu().numpy()
                 for agent_i, done_flag in enumerate(dones):
@@ -275,4 +289,4 @@ def enjoy(cfg: Config) -> Tuple[StatusCode, float]:
 
     return ExperimentStatus.SUCCESS, sum([sum(episode_rewards[i]) for i in range(env.num_agents)]) / sum(
         [len(episode_rewards[i]) for i in range(env.num_agents)]
-    )
+    ), trades_executed, infos[0]['episode_extra_stats'], done_step

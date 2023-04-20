@@ -21,7 +21,7 @@ _DEFAULT_CLIP = 5.0
 class RunningMeanStdInPlace(nn.Module):
     def __init__(self, input_shape, epsilon=_NORM_EPS, clip=_DEFAULT_CLIP, per_channel=False, norm_only=False):
         super().__init__()
-        log.debug("RunningMeanStd input shape: %r", input_shape)
+        # log.debug("RunningMeanStd input shape: %r", input_shape)
         self.input_shape: Final = input_shape
         self.eps: Final[float] = epsilon
         self.clip: Final[float] = clip

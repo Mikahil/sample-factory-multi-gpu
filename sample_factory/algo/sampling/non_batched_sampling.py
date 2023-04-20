@@ -105,7 +105,7 @@ class ActorState:
         if self.training_info[self.curr_policy_id] is not None:
             reward_shaping = self.training_info[self.curr_policy_id].get("reward_shaping", None)
             set_reward_shaping(self.env, reward_shaping, self.agent_idx)
-            set_training_info(self.env_training_info_interface, self.training_info[self.curr_policy_id])
+            self.env.set_curr_step(self.training_info[self.curr_policy_id]["approx_total_training_steps"])
 
     def _on_new_policy(self, new_policy_id):
         """Called when the new policy is sampled for this actor."""
@@ -130,7 +130,6 @@ class ActorState:
         :param rollout_step: number of steps since we started the current rollout. When this reaches cfg.rollout
         we finalize the trajectory buffer and send it to the learner.
         """
-
         self.curr_traj_buffer[rollout_step] = data
 
     def reset_rnn_state(self):

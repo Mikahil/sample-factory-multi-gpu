@@ -200,7 +200,12 @@ def add_rl_args(p: ArgumentParser):
         type=str2bool,
         help="Whether to use running mean and standard deviation to normalize discounted returns",
     )
-
+    p.add_argument(
+        "--fp16_autocast",
+        default=False,
+        type=str2bool,
+        help="Whether to use automatic mixed precision (AMP) training. This is a new feature in PyTorch 1.6 and is still experimental. "
+    )
     # components of the loss function
     p.add_argument(
         "--exploration_loss_coeff",
@@ -215,6 +220,13 @@ def add_rl_args(p: ArgumentParser):
         type=float,
         help="Coefficient for fixed KL loss (as used by Schulman et al. in https://arxiv.org/pdf/1707.06347.pdf). "
         "Highly recommended for environments with continuous action spaces.",
+    )
+    
+    p.add_argument(
+        "--transformer_mem_len",
+        default=0,
+        type=int,
+        help="Length of the memory for the transformer. If 0, no memory is used.",
     )
     p.add_argument(
         "--exploration_loss",
@@ -298,7 +310,7 @@ def add_rl_args(p: ArgumentParser):
     p.add_argument(
         "--lr_schedule",
         default="constant",
-        choices=["constant", "kl_adaptive_minibatch", "kl_adaptive_epoch"],
+        choices=["constant", "kl_adaptive_minibatch", "kl_adaptive_epoch", "cosine_warmup"],
         type=str,
         help=(
             "Learning rate schedule to use. Constant keeps constant learning rate throughout training."
@@ -307,6 +319,9 @@ def add_rl_args(p: ArgumentParser):
             "increased or decreased"
         ),
     )
+    p.add_argument("--schedule_warmup_steps", default=0, type=int, help="Used with cosine_warmup scheduler")
+    p.add_argument("--schedule_end_step", default=0, type=int, help="Used with cosine_warmup scheduler")
+    p.add_argument("--annealing_frequency", default=2.0, type=float, help="Cosine annealing frequency")
     p.add_argument("--lr_schedule_kl_threshold", default=0.008, type=float, help="Used with kl_adaptive_* schedulers")
     p.add_argument("--lr_adaptive_min", default=1e-6, type=float, help="Minimum learning rate")
     p.add_argument(

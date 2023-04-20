@@ -76,7 +76,8 @@ def policy_output_shapes(num_actions, num_action_distribution_parameters) -> Lis
     return policy_outputs
 
 
-def alloc_trajectory_tensors(env_info: EnvInfo, num_traj, rollout, rnn_size, device, share) -> TensorDict:
+def alloc_trajectory_tensors(env_info: EnvInfo, num_traj, rollout, rnn_size, device, share, num_layers=2, transformer_mem_len=100) -> TensorDict:
+    from gym_trades.envConstants import TRANSFORMER_D_MODEL
     obs_space = env_info.obs_space
 
     tensors = TensorDict()
@@ -89,7 +90,7 @@ def alloc_trajectory_tensors(env_info: EnvInfo, num_traj, rollout, rnn_size, dev
     # we need to allocate an extra rollout step here to calculate the value estimates for the last step
     for space_name, space in obs_space.spaces.items():
         tensors["obs"][space_name] = init_tensor([num_traj, rollout + 1], space.dtype, space.shape, device, share)
-    tensors["rnn_states"] = init_tensor([num_traj, rollout + 1], torch.float32, [rnn_size], device, share)
+    tensors["rnn_states"] = init_tensor([num_traj, rollout + 1], torch.float32, [(num_layers + 1) * transformer_mem_len * TRANSFORMER_D_MODEL], device, share)
 
     num_actions, num_action_distribution_parameters = action_info(env_info)
     policy_outputs = policy_output_shapes(num_actions, num_action_distribution_parameters)
@@ -117,7 +118,8 @@ def alloc_trajectory_tensors(env_info: EnvInfo, num_traj, rollout, rnn_size, dev
     return tensors
 
 
-def alloc_policy_output_tensors(cfg, env_info: EnvInfo, rnn_size, device, share):
+def alloc_policy_output_tensors(cfg, env_info: EnvInfo, rnn_size, device, share, num_layers=2, transformer_mem_len=100):
+    from gym_trades.envConstants import TRANSFORMER_D_MODEL
     num_agents = env_info.num_agents
     envs_per_split = cfg.num_envs_per_worker // cfg.worker_num_splits
 
@@ -129,7 +131,7 @@ def alloc_policy_output_tensors(cfg, env_info: EnvInfo, rnn_size, device, share)
 
     num_actions, num_action_distribution_parameters = action_info(env_info)
     policy_outputs = policy_output_shapes(num_actions, num_action_distribution_parameters)
-    policy_outputs += [("new_rnn_states", [rnn_size])]  # different name so we don't override current step rnn_state
+    policy_outputs += [("new_rnn_states", [(num_layers + 1) * transformer_mem_len * TRANSFORMER_D_MODEL])]  # different name so we don't override current step rnn_state
 
     output_names, output_shapes = list(zip(*policy_outputs))
     output_sizes = [shape[0] if shape else 1 for shape in output_shapes]
@@ -210,7 +212,7 @@ class BufferMgr(Configurable):
                 self.max_batches_to_accumulate * self.trajectories_per_training_iteration * cfg.num_policies,
             )
 
-            self.traj_buffer_queues[device] = get_queue(cfg.serial_mode)
+            self.traj_buffer_queues[device] = get_queue(cfg.serial_mode, 1000000)
 
             self.traj_tensors_torch[device] = alloc_trajectory_tensors(
                 env_info,
@@ -219,9 +221,13 @@ class BufferMgr(Configurable):
                 rnn_size,
                 device,
                 share,
+                cfg.rnn_num_layers,
+                cfg.transformer_mem_len
             )
             self.policy_output_tensors_torch[device], output_names, output_sizes = alloc_policy_output_tensors(
-                cfg, env_info, rnn_size, device, share
+                cfg, env_info, rnn_size, device, share,
+                cfg.rnn_num_layers,
+                cfg.transformer_mem_len
             )
             self.output_names, self.output_sizes = output_names, output_sizes
 

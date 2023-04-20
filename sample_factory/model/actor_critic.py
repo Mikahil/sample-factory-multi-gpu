@@ -135,6 +135,7 @@ class ActorCriticSharedWeights(ActorCritic):
         action_space: ActionSpace,
         cfg: Config,
     ):
+        from gym_trades.envConstants import TRANSFORMER_D_MODEL
         super().__init__(obs_space, action_space, cfg)
 
         # in case of shared weights we're using only a single encoder and a single core
@@ -148,6 +149,7 @@ class ActorCriticSharedWeights(ActorCritic):
 
         self.critic_linear = nn.Linear(decoder_out_size, 1)
         self.action_parameterization = self.get_action_parameterization(decoder_out_size)
+        self.mem_shape = [(cfg.rnn_num_layers + 1), cfg.transformer_mem_len, TRANSFORMER_D_MODEL]
 
         self.apply(self.initialize_weights)
 
@@ -155,8 +157,8 @@ class ActorCriticSharedWeights(ActorCritic):
         x = self.encoder(normalized_obs_dict)
         return x
 
-    def forward_core(self, head_output: Tensor, rnn_states):
-        x, new_rnn_states = self.core(head_output, rnn_states)
+    def forward_core(self, head_output: Tensor, rnn_states, should_update_memory=True):
+        x, new_rnn_states = self.core(head_output, rnn_states, should_update_memory)
         return x, new_rnn_states
 
     def forward_tail(self, core_output, values_only: bool, sample_actions: bool) -> TensorDict:
@@ -175,13 +177,20 @@ class ActorCriticSharedWeights(ActorCritic):
         self._maybe_sample_actions(sample_actions, result)
         return result
 
-    def forward(self, normalized_obs_dict, rnn_states, values_only=False, is_seq=False) -> TensorDict:
-        if is_seq:
-            return self.forward_core(PackedSequence(normalized_obs_dict[0], normalized_obs_dict[1].cpu(), normalized_obs_dict[2]), rnn_states)
+    def forward(self, normalized_obs_dict, rnn_states, values_only=False, is_seq=False, core_only=False) -> TensorDict:
+        rnn_states = rnn_states.view(rnn_states.size(0), *self.mem_shape)
+        # if is_seq:
+        #     normalized_obs_dict = PackedSequence(normalized_obs_dict[0], normalized_obs_dict[1].cpu(), normalized_obs_dict[2])
+        if core_only:
+            # print("core_only", normalized_obs_dict.shape, rnn_states.shape)
+            return self.forward_core(normalized_obs_dict, rnn_states, False)
         x = self.forward_head(normalized_obs_dict)
+        # print("inference_worker", x.shape, rnn_states.shape)
+        # print("before", x.shape, rnn_states.shape)
         x, new_rnn_states = self.forward_core(x, rnn_states)
+        # print("after", x.shape, rnn_states.shape)
         result = self.forward_tail(x, values_only, sample_actions=True)
-        result["new_rnn_states"] = new_rnn_states
+        result["new_rnn_states"] = new_rnn_states.view(new_rnn_states.size(0), -1)
         return result
 
 
