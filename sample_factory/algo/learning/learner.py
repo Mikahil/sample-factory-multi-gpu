@@ -620,10 +620,8 @@ class Learner(Configurable):
                     mb.rnn_states,
                     recurrence,
                 )
-                is_seq = True
             else:
                 rnn_states = mb.rnn_states[::recurrence]
-                is_seq = False
 
         # calculate RNN outputs for each timestep in a loop
         with self.timing.add_time("bptt"):
@@ -846,6 +844,9 @@ class Learner(Configurable):
                         with timing.add_time("clip"):
                             torch.nn.utils.clip_grad_norm_(self.actor_critic.parameters(), self.cfg.max_grad_norm)
 
+                    # if self.cfg.fp16_autocast:
+                    #     self.scaler.step(self.optimizer)
+                    #     self.scaler.update()
                     curr_policy_version = self.train_step  # policy version before the weight update
 
                     actual_lr = self.curr_lr
@@ -970,7 +971,6 @@ class Learner(Configurable):
 
         # this caused numerical issues on some versions of PyTorch with second moment reaching infinity
         adam_max_second_moment = 0.0
-        # optimizer = self.optimizer if self.cfg.gpu_per_policy == 1 else self.optimizer.optim
         for key, tensor_state in self.optimizer.state.items():
             adam_max_second_moment = max(tensor_state["exp_avg_sq"].max().item(), adam_max_second_moment)
         stats.adam_max_second_moment = adam_max_second_moment
