@@ -41,7 +41,7 @@ class ModelFactory:
         Override the default encoder with a custom model.
         The computational graph structure is: observations -> encoder -> core -> decoder -> actions
         """
-        log.debug(f"register_encoder_factory: {make_model_encoder_func}")
+        # log.debug(f"register_encoder_factory: {make_model_encoder_func}")
         self.make_model_encoder_func = make_model_encoder_func
 
     def register_model_core_factory(self, make_model_core_func: MakeCoreFunc):
@@ -49,7 +49,7 @@ class ModelFactory:
         Override the default core with a custom model.
         The computational graph structure is: observations -> encoder -> core -> decoder -> actions
         """
-        log.debug(f"register_model_core_factory: {make_model_core_func}")
+        # log.debug(f"register_model_core_factory: {make_model_core_func}")
         self.make_model_core_func = make_model_core_func
 
     def register_decoder_factory(self, make_model_decoder_func: MakeDecoderFunc):

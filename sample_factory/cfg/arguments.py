@@ -180,8 +180,8 @@ def verify_cfg(cfg: Config, env_info: EnvInfo) -> bool:
     if cfg.gpu_per_policy > 1:
         if cfg.with_pbt:
             cfg_error("PBT is not supported with gpu_per_policy > 1")
-        if cfg.normalize_returns:
-            cfg_error("normalize_returns is not supported with gpu_per_policy > 1")
+        # if cfg.normalize_returns:
+        #     cfg_error("normalize_returns is not supported with gpu_per_policy > 1")
         if cfg.num_policies != 1:
             cfg_error("gpu_per_policy > 1 is only supported for single policy experiments.")
             
@@ -197,10 +197,10 @@ def verify_cfg(cfg: Config, env_info: EnvInfo) -> bool:
         )
 
     if cfg.use_rnn:
-        if cfg.recurrence <= 1:
-            cfg_error(
-                f"{cfg.recurrence=} must be > 1 to train an RNN. Recommeded value is recurrence == {cfg.rollout=}."
-            )
+        # if cfg.recurrence <= 1:
+        #     cfg_error(
+        #         f"{cfg.recurrence=} must be > 1 to train an RNN. Recommeded value is recurrence == {cfg.rollout=}."
+        #     )
 
         if cfg.with_vtrace and cfg.recurrence != cfg.rollout:
             cfg_error(f"{cfg.recurrence=} must be equal to {cfg.rollout=} when using vtrace.")

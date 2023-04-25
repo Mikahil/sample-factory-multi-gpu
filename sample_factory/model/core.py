@@ -60,7 +60,6 @@ class ModelCoreRNN(ModelCore):
             new_rnn_states = new_rnn_states.reshape(new_rnn_states.size(0), -1)
         else:
             new_rnn_states = new_rnn_states.squeeze(0)
-
         return x, new_rnn_states
 
 
