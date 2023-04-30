@@ -223,12 +223,6 @@ def add_rl_args(p: ArgumentParser):
     )
     
     p.add_argument(
-        "--transformer_mem_len",
-        default=0,
-        type=int,
-        help="Length of the memory for the transformer. If 0, no memory is used.",
-    )
-    p.add_argument(
         "--exploration_loss",
         default="entropy",
         type=str,
@@ -290,6 +284,12 @@ def add_rl_args(p: ArgumentParser):
 
     # optimization
     p.add_argument("--optimizer", default="adam", type=str, choices=["adam", "lamb"], help="Type of optimizer to use")
+    p.add_argument(
+        "--adam_weight_decay",
+        default=0.0,
+        type=float,
+        help="Adam epsilon parameter (1e-8 to 1e-5 seem to reliably work okay, 1e-3 and up does not work)",
+    )
     p.add_argument(
         "--adam_eps",
         default=1e-6,
