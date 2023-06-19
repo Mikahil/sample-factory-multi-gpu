@@ -150,7 +150,7 @@ def alloc_policy_output_tensors(cfg, env_info: EnvInfo, rnn_size, device, share)
 
 
 class BufferMgr(Configurable):
-    def __init__(self, cfg, env_info: EnvInfo):
+    def __init__(self, cfg, env_info: EnvInfo, gpu_id):
         super().__init__(cfg)
         self.env_info = env_info
 
@@ -159,7 +159,7 @@ class BufferMgr(Configurable):
         for i in range(cfg.num_workers):
             # TODO: this should take into account whether we just need a GPU for sampling, or we actually receive observations on the GPU
             # otherwise it will not work for things like Megaverse or GPU-rendered DMLab
-            sampling_device = str(rollout_worker_device(i, cfg, self.env_info))
+            sampling_device = str(rollout_worker_device(i, cfg, self.env_info, gpu_id))
             log.debug(f"Rollout worker {i} uses device {sampling_device}")
 
             num_buffers = env_info.num_agents * cfg.num_envs_per_worker

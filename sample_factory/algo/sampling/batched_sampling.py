@@ -161,6 +161,7 @@ class BatchedVectorEnvRunner(VectorEnvRunner):
                 worker_index=self.worker_idx,
                 vector_index=vector_idx,
                 env_id=env_id * (self.gpu_id + 1),
+                gpu_id=self.gpu_id
             )
 
             # log.info('Creating env %r... %d-%d-%d', env_config, self.worker_idx, self.split_idx, env_i)
@@ -233,16 +234,15 @@ class BatchedVectorEnvRunner(VectorEnvRunner):
                 if prefix:
                     key_str = f"{'/'.join(prefix)}/{key}"
 
-                if isinstance(value, Tensor):
-                    if value.numel() == 1:
-                        stats[key_str] = value.item()
-                    elif len(value.shape) >= 1 and len(value) == self.vec_env.num_agents:
+                if isinstance(value, numbers.Number):
+                    stats[key_str] = value
+                else:
+                    if len(value.shape) >= 1 and len(value) == self.vec_env.num_agents:
                         # saving value for all agents who finished the episode
                         stats[key_str] = value[finished]
                     else:
                         log.warning(f"Infos tensor with unexpected shape {value.shape}")
-                elif isinstance(value, numbers.Number):
-                    stats[key_str] = value
+                
         else:
             # non-vectorized reports: TODO (parse infos)
 

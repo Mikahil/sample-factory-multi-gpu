@@ -242,12 +242,10 @@ class Runner(EventLoopObject, Configurable):
         if not (isinstance(msgs, (List, Tuple)) and isinstance(msgs[0], (dict, OrderedDict))):
             log.error("While parsing a message: expected a dictionary or list/tuple of dictionaries, found %r", msgs)
             return
-
         for msg in msgs:
             # some messages are policy-specific
             policy_id = msg.get("policy_id", None)
             gpu_id = msg.get("gpu_id", None)
-
             for key in msg:
                 for handler in self.msg_handlers.get(key, ()):
                     handler(self, msg)
@@ -560,7 +558,7 @@ class Runner(EventLoopObject, Configurable):
         self._save_cfg()
         save_git_diff(experiment_dir(self.cfg))
 
-        self.buffer_mgr = [BufferMgr(self.cfg, self.env_info) for _ in range(self.cfg.gpu_per_policy)]
+        self.buffer_mgr = [BufferMgr(self.cfg, self.env_info, gpu_idx) for gpu_idx in range(self.cfg.gpu_per_policy)]
 
         self._observers_call(AlgoObserver.on_init, self)
 

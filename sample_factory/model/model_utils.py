@@ -44,11 +44,11 @@ def fc_layer(in_features: int, out_features: int, bias=True, spec_norm=False) ->
     return layer
 
 
-def create_mlp(layer_sizes: List[int], input_size: int, activation: nn.Module) -> nn.Module:
+def create_mlp(layer_sizes: List[int], input_size: int, activation: nn.Module, dropout=0.0) -> nn.Module:
     """Sequential fully connected layers."""
     layers = []
     for i, size in enumerate(layer_sizes):
-        layers.extend([fc_layer(input_size, size), activation])
+        layers.extend([fc_layer(input_size, size), activation, nn.Dropout(dropout)])
         input_size = size
 
     if len(layers) > 0:

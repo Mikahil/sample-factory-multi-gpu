@@ -602,39 +602,24 @@ class Learner(Configurable):
             clip_ratio_low = 1.0 / clip_ratio_high
             clip_value = self.cfg.ppo_clip_value
 
-            valids = mb.valids
-
-        # calculate policy head outside of recurrent loop
-        with self.timing.add_time("forward_head"):
-            head_outputs = actor_critic.forward_head(mb.normalized_obs)
-            minibatch_size: int = head_outputs.size(0)
-
-        # initial rnn states
-        with self.timing.add_time("bptt_initial"):
-            if self.cfg.use_rnn:
-                # this is the only way to stop RNNs from backpropagating through invalid timesteps
-                # (i.e. experience collected by another policy)
-                done_or_invalid = torch.logical_or(mb.dones_cpu, ~valids.cpu()).float()
-                head_output_seq, rnn_states, inverted_select_inds = build_rnn_inputs(
-                    head_outputs,
-                    done_or_invalid,
-                    mb.rnn_states,
-                    recurrence,
-                )
-            else:
-                rnn_states = mb.rnn_states[::recurrence]
+            valids = mb.valids          
 
         # calculate RNN outputs for each timestep in a loop
         with self.timing.add_time("bptt"):
             if self.cfg.use_rnn:
+                with self.timing.add_time("bptt_initial"):
+                    done_or_invalid = torch.logical_or(mb.dones_cpu, ~valids.cpu()).float()
+                    build_rnn_inputs_params = (
+                        mb.normalized_obs,
+                        done_or_invalid,
+                        recurrence,
+                    )
                 with self.timing.add_time("bptt_forward_core"):
-                    core_output_seq, _ = self.actor_critic(head_output_seq, rnn_states, is_seq=True)
-                core_outputs = build_core_out_from_seq(core_output_seq, inverted_select_inds)
+                    core_output_seq, inverted_select_inds, minibatch_size = self.actor_critic(build_rnn_inputs_params, mb.rnn_states, is_seq=True, core_only=True)
+                core_outputs = build_core_out_from_seq(core_output_seq[0], inverted_select_inds)
                 del core_output_seq
             else:
-                core_outputs, _ = self.actor_critic(head_outputs, rnn_states, is_seq=False)
-
-            del head_outputs
+                (core_outputs, _), minibatch_size = self.actor_critic(mb.normalized_obs, mb.rnn_states[::recurrence], is_seq=False, core_only=True)
 
         num_trajectories = minibatch_size // recurrence
         assert core_outputs.shape[0] == minibatch_size
