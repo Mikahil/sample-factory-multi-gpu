@@ -526,18 +526,26 @@ class Learner(Configurable):
         return kl_old, kl_loss
 
     def _entropy_exploration_loss(self, action_distribution, valids, num_invalids: int) -> Tensor:
+        fraction = (self.env_steps * self.cfg.gpu_per_policy) / self.cfg.exploration_end_step
+        if fraction > 1.0:
+            fraction = 1.0
+        ent_coef = self.cfg.exploration_loss_coeff + fraction * (self.cfg.exploration_coeff_end - self.cfg.exploration_loss_coeff)
         entropy = action_distribution.entropy()
         entropy = masked_select(entropy, valids, num_invalids)
-        entropy_loss = -self.cfg.exploration_loss_coeff * entropy.mean()
+        entropy_loss = -ent_coef * entropy.mean()
         return entropy_loss
 
     def _symmetric_kl_exploration_loss(self, action_distribution, valids, num_invalids: int) -> Tensor:
+        fraction = (self.env_steps * self.cfg.gpu_per_policy) / self.cfg.exploration_end_step
+        if fraction > 1.0:
+            fraction = 1.0
+        ent_coef = self.cfg.exploration_loss_coeff + fraction * (self.cfg.exploration_coeff_end - self.cfg.exploration_loss_coeff)
         kl_prior = action_distribution.symmetric_kl_with_uniform_prior()
         kl_prior = masked_select(kl_prior, valids, num_invalids).mean()
         if not torch.isfinite(kl_prior):
             kl_prior = torch.zeros(kl_prior.shape)
         kl_prior = torch.clamp(kl_prior, max=30)
-        kl_prior_loss = self.cfg.exploration_loss_coeff * kl_prior
+        kl_prior_loss = ent_coef * kl_prior
         return kl_prior_loss
 
     def _optimizer_lr(self):
@@ -615,18 +623,14 @@ class Learner(Configurable):
                         recurrence,
                     )
                 with self.timing.add_time("bptt_forward_core"):
-                    core_output_seq, inverted_select_inds, minibatch_size = self.actor_critic(build_rnn_inputs_params, mb.rnn_states, is_seq=True, core_only=True)
-                core_outputs = build_core_out_from_seq(core_output_seq[0], inverted_select_inds)
-                del core_output_seq
+                    result, inverted_select_inds, minibatch_size = self.actor_critic(build_rnn_inputs_params, mb.rnn_states, is_seq=True, is_learner=True)
             else:
-                (core_outputs, _), minibatch_size = self.actor_critic(mb.normalized_obs, mb.rnn_states[::recurrence], is_seq=False, core_only=True)
+                result, minibatch_size = self.actor_critic(mb.normalized_obs, mb.rnn_states[::recurrence], is_seq=False, is_learner=True)
 
         num_trajectories = minibatch_size // recurrence
-        assert core_outputs.shape[0] == minibatch_size
 
         with self.timing.add_time("tail"):
             # calculate policy tail outside of recurrent loop
-            result = actor_critic.forward_tail(core_outputs, values_only=False, sample_actions=False)
             action_distribution = actor_critic.action_distribution()
             log_prob_actions = action_distribution.log_prob(mb.actions)
             ratio = torch.exp(log_prob_actions - mb.log_prob_actions)  # pi / pi_old
@@ -635,8 +639,6 @@ class Learner(Configurable):
             ratio = torch.clamp(ratio, 0.05, 20.0)
 
             values = result["values"].squeeze()
-
-            del core_outputs
 
         # these computations are not the part of the computation graph
         with torch.no_grad(), self.timing.add_time("advantages_returns"):

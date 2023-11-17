@@ -29,10 +29,14 @@ class ActionParameterizationDefault(ActionsParameterization):
 
         num_action_outputs = calc_num_action_parameters(action_space)
         self.distribution_linear = nn.Linear(core_out_size, num_action_outputs)
+        self.eval_temp = cfg.eval_temp
+        self.is_eval = cfg.is_eval
 
     def forward(self, actor_core_output):
         """Just forward the FC layer and generate the distribution object."""
         action_distribution_params = self.distribution_linear(actor_core_output)
+        if self.is_eval:
+            action_distribution_params /= self.eval_temp
         action_distribution = get_action_distribution(self.action_space, raw_logits=action_distribution_params)
         return action_distribution_params, action_distribution
 

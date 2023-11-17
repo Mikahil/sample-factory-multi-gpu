@@ -18,6 +18,7 @@ from sample_factory.utils.normalize import ObservationNormalizer
 from sample_factory.utils.typing import ActionSpace, Config, ObsSpace
 from sample_factory.algo.learning.rnn_utils import build_rnn_inputs
 from torch.nn.utils.rnn import PackedSequence
+from sample_factory.algo.learning.rnn_utils import build_core_out_from_seq
 
 class ActorCritic(nn.Module, Configurable):
     def __init__(self, obs_space: ObsSpace, action_space: ActionSpace, cfg: Config):
@@ -176,10 +177,10 @@ class ActorCriticSharedWeights(ActorCritic):
         self._maybe_sample_actions(sample_actions, result)
         return result
 
-    def forward(self, normalized_obs_dict, rnn_states, values_only=False, is_seq=False, core_only=False):
+    def forward(self, normalized_obs_dict, rnn_states, values_only=False, is_seq=False, is_learner=False):
         
             # normalized_obs_dict = PackedSequence(normalized_obs_dict[0], normalized_obs_dict[1].cpu(), normalized_obs_dict[2])
-        if core_only:
+        if is_learner:
             if is_seq:
                 head_outputs = self.forward_head(normalized_obs_dict[0])
                 minibatch_size: int = head_outputs.size(0)
@@ -187,11 +188,16 @@ class ActorCriticSharedWeights(ActorCritic):
                                                                                          normalized_obs_dict[1].cpu(),
                                                                                          rnn_states,
                                                                                          normalized_obs_dict[2],)
-                return self.forward_core(PackedSequence(*normalized_obs_dict), rnn_states), inverted_select_inds, minibatch_size
+                core_output = self.forward_core(PackedSequence(*normalized_obs_dict), rnn_states)
+                core_output = build_core_out_from_seq(core_output[0], inverted_select_inds)
+                result = self.forward_tail(core_output, values_only=False, sample_actions=False)
+                return result, inverted_select_inds, minibatch_size
             else:
                 normalized_obs_dict = self.forward_head(normalized_obs_dict)
                 minibatch_size: int = normalized_obs_dict.size(0)
-                return self.forward_core(normalized_obs_dict, rnn_states), minibatch_size
+                core_output = self.forward_core(normalized_obs_dict, rnn_states)
+                result = self.forward_tail(core_output[0], values_only=False, sample_actions=False)
+                return result, minibatch_size
         else:
             x = self.forward_head(normalized_obs_dict)
             x, new_rnn_states = self.forward_core(x, rnn_states)
@@ -285,12 +291,31 @@ class ActorCriticSeparateWeights(ActorCritic):
         self._maybe_sample_actions(sample_actions, result)
         return result
 
-    def forward(self, normalized_obs_dict, rnn_states, values_only=False) -> TensorDict:
-        x = self.forward_head(normalized_obs_dict)
-        x, new_rnn_states = self.forward_core(x, rnn_states)
-        result = self.forward_tail(x, values_only, sample_actions=True)
-        result["new_rnn_states"] = new_rnn_states
-        return result
+    def forward(self, normalized_obs_dict, rnn_states, values_only=False, is_seq=False, is_learner=False):
+        if is_learner:
+            if is_seq:
+                head_outputs = self.forward_head(normalized_obs_dict[0])
+                minibatch_size: int = head_outputs.size(0)
+                normalized_obs_dict, rnn_states, inverted_select_inds = build_rnn_inputs(head_outputs,
+                                                                                         normalized_obs_dict[1].cpu(),
+                                                                                         rnn_states,
+                                                                                         normalized_obs_dict[2],)
+                core_output = self.forward_core(PackedSequence(*normalized_obs_dict), rnn_states)
+                core_output = build_core_out_from_seq(core_output[0], inverted_select_inds)
+                result = self.forward_tail(core_output, values_only=False, sample_actions=False)
+                return result, inverted_select_inds, minibatch_size
+            else:
+                normalized_obs_dict = self.forward_head(normalized_obs_dict)
+                minibatch_size: int = normalized_obs_dict.size(0)
+                core_output = self.forward_core(normalized_obs_dict, rnn_states)
+                result = self.forward_tail(core_output[0], values_only=False, sample_actions=False)
+                return result, minibatch_size
+        else:
+            x = self.forward_head(normalized_obs_dict)
+            x, new_rnn_states = self.forward_core(x, rnn_states)
+            result = self.forward_tail(x, values_only, sample_actions=True)
+            result["new_rnn_states"] = new_rnn_states
+            return result
 
 
 def default_make_actor_critic_func(cfg: Config, obs_space: ObsSpace, action_space: ActionSpace) -> ActorCritic:

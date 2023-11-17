@@ -44,6 +44,12 @@ def add_rl_args(p: ArgumentParser):
     """Arguments not specific to any particular RL algorithm."""
     # RL training system configuration (i.e. whether sync or async, etc.)
     p.add_argument(
+        "--eval_deterministic",
+        default=False,
+        type=str2bool,
+        help="False to sample from action distributions at test time. True to just use the argmax.",
+    )
+    p.add_argument(
         "--num_policies",
         default=1,
         type=int,
@@ -467,6 +473,18 @@ def add_rl_args(p: ArgumentParser):
         help="Stop after all policies are trained for this many env steps",
     )
     p.add_argument("--train_for_seconds", default=int(1e10), type=int, help="Stop training after this many seconds")
+    p.add_argument(
+        "--exploration_end_step",
+        default=int(1e10),
+        type=int,
+        help="Step at which exploration will be exploration_coeff_end",
+    )
+    p.add_argument(
+        "--exploration_coeff_end",
+        default=0.01,
+        type=float,
+        help="Exploration coefficient at the end of training",
+    )
 
     # model saving
     p.add_argument("--save_every_sec", default=120, type=int, help="Checkpointing rate")
@@ -700,13 +718,6 @@ def add_eval_args(parser):
 
     parser.add_argument(
         "--policy_index", default=0, type=int, help="Policy to evaluate in case of multi-policy training"
-    )
-
-    parser.add_argument(
-        "--eval_deterministic",
-        default=False,
-        type=str2bool,
-        help="False to sample from action distributions at test time. True to just use the argmax.",
     )
 
     parser.add_argument(

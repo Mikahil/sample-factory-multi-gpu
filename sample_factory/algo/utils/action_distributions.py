@@ -108,8 +108,8 @@ class CategoricalActionDistribution:
         sample = torch.argmax(self.raw_logits - torch.empty_like(self.raw_logits).exponential_().log_(), -1)
         return sample
 
-    def sample(self):
-        samples = torch.multinomial(self.probs, 1, True)
+    def sample(self, num_samples=1):
+        samples = torch.multinomial(self.probs, num_samples, True)
         return samples
 
     def log_prob(self, value):

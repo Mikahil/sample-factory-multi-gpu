@@ -119,7 +119,6 @@ class BatchedVectorEnvRunner(VectorEnvRunner):
         :param training_info: curr env steps, reward shaping scheme, etc.
         """
         super().__init__(cfg, env_info, worker_idx, split_idx, buffer_mgr, sampling_device)
-
         self.policy_id = worker_idx % self.cfg.num_policies
         self.gpu_id = gpu_id
         log.debug(f"EnvRunner {worker_idx}-{split_idx} uses policy {self.policy_id}")
@@ -160,7 +159,7 @@ class BatchedVectorEnvRunner(VectorEnvRunner):
             env_config = AttrDict(
                 worker_index=self.worker_idx,
                 vector_index=vector_idx,
-                env_id=env_id * (self.gpu_id + 1),
+                env_id=env_id + self.gpu_id * self.cfg.num_envs_per_worker * self.cfg.num_workers,
                 gpu_id=self.gpu_id
             )
 
